@@ -4,7 +4,7 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const jwt = require("jsonwebtoken");
-const morgan = require("morgan");
+// const morgan = require("morgan");
 
 const port = process.env.PORT || 9000;
 const app = express();
@@ -18,7 +18,7 @@ app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(cookieParser());
-app.use(morgan("dev"));
+// app.use(morgan("dev"));
 
 const verifyToken = async (req, res, next) => {
   const token = req.cookies?.token;
@@ -51,6 +51,7 @@ async function run() {
     const db = client.db("plantNet-session");
     const usersCollection = db.collection("users");
     const plantsCollection = db.collection("plants");
+    const ordersCollection = db.collection("orders");
 
     // save or update a user in db
     app.post("/users/:email", async (req, res) => {
@@ -69,6 +70,31 @@ async function run() {
         role: "customer",
       });
       res.send(result);
+    });
+
+    // manage user status and role
+    app.patch("/users/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+      if (!user || user?.status === "Requested")
+        return res
+          .status(400)
+          .send("You have already requested, wait for some time.");
+      const updateDoc = {
+        $set: {
+          status: "Requested",
+        },
+      };
+      const result = await usersCollection.updateOne(query, updateDoc);
+      res.send(result);
+    });
+
+    // get user role
+    app.get("/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await usersCollection.findOne({ email });
+      res.send({ role: result?.role });
     });
 
     // Generate jwt token
@@ -99,18 +125,104 @@ async function run() {
     });
 
     // save a plant data in db
-    app.post("/plants", verifyToken, async(req, res) => {
+    app.post("/plants", verifyToken, async (req, res) => {
       const plant = req.body;
       const result = await plantsCollection.insertOne(plant);
       res.send(result);
-    })
+    });
 
     // get a plant data in db
-    app.get("/plants", async(req, res) => {
+    app.get("/plants", async (req, res) => {
       const result = await plantsCollection.find().toArray();
       res.send(result);
-    })
+    });
 
+    // get a plant by id
+    app.get("/plants/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await plantsCollection.findOne(query);
+      res.send(result);
+    });
+
+    // save a order in db
+    app.post("/order", verifyToken, async (req, res) => {
+      const orderInfo = req.body;
+      const result = await ordersCollection.insertOne(orderInfo);
+      res.send(result);
+    });
+
+    // manage order quantity
+    app.patch("/plants/quantity/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const { quantityToUpdate, status } = req.body;
+      const filter = { _id: new ObjectId(id) };
+      let updateDoc = {
+        $inc: { quantity: -quantityToUpdate },
+      };
+      if (status === "increase") {
+        updateDoc = {
+          $inc: { quantity: quantityToUpdate },
+        };
+      }
+      const result = await plantsCollection.updateOne(filter, updateDoc);
+      res.send(result);
+    });
+
+    // get all orders for a specific customer
+    app.get("/customer-orders/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const query = { "customer.email": email };
+      const result = await ordersCollection
+        .aggregate([
+          {
+            $match: query,
+          },
+          {
+            $addFields: {
+              plantId: { $toObjectId: "$plantId" },
+            },
+          },
+          {
+            $lookup: {
+              from: "plants",
+              localField: "plantId",
+              foreignField: "_id",
+              as: "plants",
+            },
+          },
+          {
+            $unwind: "$plants",
+          },
+          {
+            $addFields: {
+              name: "$plants.name",
+              image: "$plants.image",
+              category: "$plants.category",
+            },
+          },
+          {
+            $project: {
+              plants: 0,
+            },
+          },
+        ])
+        .toArray();
+      res.send(result);
+    });
+
+    // cancel/delete an order
+    app.delete("/orders/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const order = await ordersCollection.findOne(query);
+      if (order.status === "delivered")
+        return res
+          .status(409)
+          .send("Cannot cancel once the product is delivered");
+      const result = await ordersCollection.deleteOne(query);
+      res.send(result);
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
